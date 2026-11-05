@@ -31,6 +31,11 @@ pub fn initialize(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Fingerprint of the exact source snapshot that supplied stored observations.
+pub fn source_fingerprint(conn: &Connection, agent: &str, path: &str) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT fingerprint FROM multi_sources WHERE agent=?1 AND path=?2 AND status='available'",params![agent,path],|r|r.get::<_,Option<String>>(0)).optional()?.flatten())
+}
+
 pub fn unchanged(conn: &Connection, agent: &str, path: &str, fingerprint: &str) -> Result<bool> {
     Ok(conn.query_row("SELECT fingerprint=?3 AND version=?4 AND status='available' FROM multi_sources WHERE agent=?1 AND path=?2",
         params![agent,path,fingerprint,VERSION], |r| r.get(0)).optional()?.unwrap_or(false))
@@ -116,6 +121,40 @@ pub struct Filter<'a> {
     pub model: Option<&'a str>,
     pub since: Option<i64>,
     pub until: Option<i64>,
+}
+
+/// Sessions with at least one observation in the exact report scope.
+pub fn sessions(
+    conn: &Connection,
+    filter: &Filter<'_>,
+) -> Result<Vec<(String, String, super::Session)>> {
+    let mut stmt=conn.prepare("SELECT s.agent,s.source,s.id,s.project,s.parent_id,s.started_ms FROM multi_sessions s
+        WHERE (?1 IS NULL OR s.agent=?1) AND (?2 IS NULL OR s.project=?2)
+        AND EXISTS(SELECT 1 FROM multi_observations e WHERE e.agent=s.agent AND e.source=s.source AND e.session_id=s.id
+        AND (?3 IS NULL OR e.model=?3) AND (?4 IS NULL OR e.timestamp_ms>=?4) AND (?5 IS NULL OR e.timestamp_ms<?5))
+        ORDER BY s.started_ms DESC,s.agent,s.id")?;
+    let rows = stmt.query_map(
+        params![
+            filter.agent,
+            filter.project,
+            filter.model,
+            filter.since,
+            filter.until
+        ],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                super::Session {
+                    id: r.get(2)?,
+                    project: r.get(3)?,
+                    parent_id: r.get(4)?,
+                    started_ms: r.get(5)?,
+                },
+            ))
+        },
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn events(

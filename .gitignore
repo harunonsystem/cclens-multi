@@ -20,6 +20,9 @@
 *.jsonl
 !tests/**/*.jsonl
 
+# Generated per-checkout gwm configuration (may link to private local state)
+/.gwm/
+
 # OS / editor noise
 .DS_Store
 

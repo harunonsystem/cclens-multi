@@ -5,6 +5,11 @@ remain intact. CLI execution never creates repositories, publishes data, or
 edits agent configuration. Repository setup is separate from analysis.
 `claude` forwards to the original read-only reports.
 
+`workflow` adds private evidence packets, explicit-consent native advice and
+single-change experiments. See [workflow.md](workflow.md) for its artifact,
+privacy and comparison contract. Existing reports remain local; workflow never
+edits configuration or implicitly sends data to a provider.
+
 Agent adapters normalize inputs into sessions and evidence-bearing events,
 including runtime-specific identity rules applied once by each adapter. The CLI
 does not interpret event IDs.
