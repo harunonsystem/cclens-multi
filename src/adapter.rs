@@ -11,3 +11,4 @@ pub mod multi;
 pub mod opencode;
 pub mod pi;
 pub mod transcript;
+pub mod workflow;

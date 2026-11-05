@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub mod analysis;
 pub mod cli;
 pub mod store;
+pub mod workflow;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Tokens {

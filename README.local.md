@@ -11,7 +11,70 @@ Claude Code・Codex・OpenCode・pi・OMP のローカルログを共通 SQLite 
 3. `~/.cargo/bin` を PATH に入れ、ソース外で `cclens-multi agent-context` を実行する。`CARGO_INSTALL_ROOT` を指定した場合はその `bin/` を PATH に入れる。
 4. `cclens-multi analyze --dry-run --json` で入力先を確認し、`cclens-multi doctor --json` を実行する。
 
-インストール時には Cargo の依存取得が必要になる場合がある。分析時にはネットワーク・API キーを使わない。各 PC のログを各 PC の DB に集計する。複数 PC の DB を合算する機能は含めない。
+インストール時には Cargo の依存取得が必要になる場合がある。既存レポートとローカル監査にはネットワーク・API キーを使わない。任意の AI 診断だけは明示許可を受け、選択した CLI の認証と provider を使う。各 PC のログを各 PC の DB に集計する。複数 PC の DB を合算する機能は含めない。
+
+## ワークフロー改善
+
+`cargo install --path . --locked` で入る同じバイナリに `workflow` を追加している。
+監査 → 根拠付き提案 → 1変更の試行 → 比較結果を、後から再開できる私有ディレクトリに保存する。
+今回の変更は未公開。公開後は Git URL からも Cargo install できるが、crates.io 公開は行わない。
+
+1. 実ログの記録と一致する project パスでローカル監査を作る。
+
+   ```sh
+   cclens-multi workflow audit --project /tmp/example --out /tmp/example-workflow
+   cclens-multi workflow show /tmp/example-workflow --json
+   ```
+
+   既定は直近14日・新しい親5セッション・候補40イベント。完了済みタスク数とは同一視しない。
+   元の本文は既定で読まず、`--include-text` で短い抜粋を含める。
+   現在の設定との照合には `--context /path/to/current/SKILL.md` を明示する。秘密情報は渡さない。
+
+2. `workflow brief RUN --json` で入力を確認し、既存エージェントが返した JSON を取り込む。
+
+   ```sh
+   cclens-multi workflow advise /tmp/example-workflow --response /tmp/advice.json
+   ```
+
+   認証済みの pi / Claude CLI に直接診断させる場合だけ、provider 入力を許可する。
+
+   ```sh
+   cclens-multi workflow advise /tmp/example-workflow \
+     --advisor pi --advisor-model provider/model --allow-model-input --json
+   ```
+
+   Claude は `--advisor claude` と対応モデル名を指定する。
+   本文・明示 context・パスが選択した provider に送られる。tools・拡張・周辺 context の自動読み込みを無効にする。
+   不明な根拠参照や形式外の応答は保存しない。設定は自動編集しない。
+
+3. 現在も必要な変更と確認してから、試行を1件記録する。
+
+   ```sh
+   cclens-multi workflow trial start /tmp/example-workflow --finding 0 \
+     --baseline /tmp/before.json --change "use the existing verification step" \
+     --confirm-current
+   ```
+
+   対策追加済み・解消済みの提案は新規試行にしない。編集は既存の SSOT・権限ガードに従って行う。
+
+4. 同種作業の観測を比較する。
+
+   ```sh
+   cclens-multi workflow trial evaluate /tmp/example-workflow --after /tmp/after.json
+   ```
+
+   before / after は次の JSON。未取得は 0 でなく null にする。
+
+   ```json
+   {"workload":"same-fixed-tasks","model":"provider/model","tasks":3,
+    "quality_passed":true,"human_interventions":2,"rework":0,"elapsed_seconds":600}
+   ```
+
+   結果は adopt / revert / hold。品質悪化は速度改善に優先し、モデル差・欠測・比較不足は保留する。
+   観測値はユーザー入力であり、CLI が独立検証した測定値ではない。設定変更や撤回も自動では行わない。
+
+提案形式、benchmark の出典、比較条件、制限は [workflow spec](docs/specs/workflow.md) にある。
+本文を含む私有の監査 artifact は Git に追加しない。途中の記録は上書きせず、`workflow show RUN` で再開する。
 
 ## 使い方
 

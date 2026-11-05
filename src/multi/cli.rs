@@ -121,6 +121,11 @@ enum Command {
     Get { id: String },
     /// Print the compact command/output contract for an agent.
     AgentContext,
+    /// Evidence-backed workflow audits and single-change trials.
+    Workflow {
+        #[command(subcommand)]
+        command: super::workflow::Command,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -170,13 +175,22 @@ pub fn run() -> Result<()> {
         return legacy(args);
     }
     let cli = Cli::parse();
+    if cli.dry_run && !matches!(cli.command, Command::Analyze) {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--dry-run is supported only with analyze",
+            )
+            .exit();
+    }
     if matches!(cli.command, Command::AgentContext) {
         return emit(
             &json!({"schema_version":1,"binary":"cclens-multi","first_command":"cclens-multi doctor --json",
-            "commands":["analyze","usage","failures","stuck","prompts","inventory","sources","doctor","get","agent-context","claude <upstream command>"],
+            "commands":["analyze","usage","failures","stuck","prompts","inventory","sources","doctor","get","workflow","agent-context","claude <upstream command>"],
             "agents":["claude","codex","opencode","pi","omp"],"filters":["--agent","--project","--model","--since","--until","--limit"],
             "stdout":"data only","stderr":"diagnostics","exit_codes":{"0":"success, including reported coverage gaps","1":"runtime or source error","2":"invalid CLI arguments"},
-            "privacy":"inputs read-only; only derived local DB is written; no authentication or network needed",
+            "privacy":"inputs read-only; local derived DB and explicit private workflow artifacts may be written; reports need no authentication or network",
+            "workflow":{"audit":"requires --project; latest five parent sessions; original text opt-in","provider_input_requires":"--allow-model-input","advisor":"explicit pi|claude and --advisor-model; tools disabled","trial":"user-supplied observations; no automatic configuration edits or rollback"},
             "unknown":"NULL values and per-counter known-event counts; never treat gaps as zero",
             "evidence":"get <id> --agent <agent> --frozen --json; source line is one-based or SQLite table/row ID",
             "cost":"reported API-equivalent USD only; actual payment is always unavailable",
@@ -184,8 +198,26 @@ pub fn run() -> Result<()> {
             true,
         );
     }
-    let since = cli.since;
-    let until = cli.until;
+    if let Command::Workflow { command } = &cli.command {
+        if let Some(value) = super::workflow::saved(command)? {
+            return emit(&value, cli.json);
+        }
+        if cli.project.is_none() {
+            bail!("workflow audit requires --project (exact recorded path)");
+        }
+    }
+    let workflow_audit = matches!(
+        cli.command,
+        Command::Workflow {
+            command: super::workflow::Command::Audit { .. }
+        }
+    );
+    let until = cli
+        .until
+        .or_else(|| workflow_audit.then(|| chrono::Utc::now().timestamp_millis()));
+    let since = cli
+        .since
+        .or_else(|| workflow_audit.then(|| until.unwrap() - 14 * 24 * 60 * 60 * 1000));
     if since.zip(until).is_some_and(|(a, b)| a >= b) {
         Cli::command()
             .error(
@@ -204,14 +236,6 @@ pub fn run() -> Result<()> {
     }
     let path = database_path(cli.db.clone())?;
     if cli.dry_run {
-        if !matches!(cli.command, Command::Analyze) {
-            Cli::command()
-                .error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "--dry-run is supported only with analyze",
-                )
-                .exit();
-        }
         let roots = resolve_roots(&cli, None)?;
         validate_paths(&path, &roots, &cli)?;
         let rows=roots.sources().iter().filter(|(a,_)|cli.agent.is_none_or(|selected|selected.label()==*a))
@@ -258,6 +282,26 @@ pub fn run() -> Result<()> {
         );
         store
     };
+    if let Command::Workflow {
+        command: super::workflow::Command::Audit { out, .. },
+    } = &cli.command
+    {
+        let roots = resolve_roots(
+            &cli,
+            store
+                .meta("multi_roots")?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+        )?;
+        let output = out
+            .clone()
+            .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")).join("workflow"));
+        let output = output_location(&output)?;
+        for (_, source) in roots.sources() {
+            if output == source || (source.is_dir() && output.starts_with(source)) {
+                bail!("workflow artifact directory must be outside transcript inputs");
+            }
+        }
+    }
     let filter = db::Filter {
         agent: cli.agent.map(Agent::label),
         project: cli.project.as_deref(),
@@ -303,7 +347,25 @@ pub fn run() -> Result<()> {
             };
             json!({"agent":a,"project":p,"event":e})
         }
-        Command::Analyze | Command::AgentContext => unreachable!(),
+        Command::Workflow {
+            command:
+                super::workflow::Command::Audit {
+                    out,
+                    include_text,
+                    context,
+                },
+        } => super::workflow::audit(
+            &snapshot,
+            &filter,
+            out.as_deref(),
+            include_text,
+            &context,
+            &path
+                .parent()
+                .context("database parent missing")?
+                .join("workflow"),
+        )?,
+        Command::Workflow { .. } | Command::Analyze | Command::AgentContext => unreachable!(),
     };
     limit_rows(&mut value, cli.limit as usize);
     value["schema_version"] = json!(1);
@@ -366,6 +428,26 @@ fn boundary(s: &str) -> Result<i64> {
     }
     chrono::NaiveDate::parse_from_str(s,"%Y-%m-%d").ok().and_then(|d|d.and_hms_opt(0,0,0)).map(|d|d.and_utc().timestamp_millis())
         .with_context(||format!("invalid date '{s}'; use YYYY-MM-DD (UTC) or RFC3339, e.g. 2026-01-01T00:00:00+09:00"))
+}
+
+fn output_location(path: &Path) -> Result<PathBuf> {
+    let path = absolute(path.to_owned())?;
+    let mut ancestor = path.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(
+            ancestor
+                .file_name()
+                .context("output path has no existing ancestor")?
+                .to_owned(),
+        );
+        ancestor = ancestor.parent().context("output path has no parent")?;
+    }
+    let mut resolved = ancestor.canonicalize()?;
+    for part in suffix.into_iter().rev() {
+        resolved.push(part);
+    }
+    Ok(resolved)
 }
 
 fn absolute(path: PathBuf) -> Result<PathBuf> {
