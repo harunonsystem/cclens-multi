@@ -1,6 +1,6 @@
 # cclens
 
-> This public fork ships `cclens-multi` for Claude Code, Codex, OpenCode, pi and OMP.
+> This public fork ships `cclens-multi` for Claude Code, Codex, OpenCode, pi, OMP and Devin CLI.
 > See [README.local.md](README.local.md) for installation and usage.
 > The upstream README is preserved below.
 

@@ -187,6 +187,7 @@ pub fn read(agent: &str, home: &Path, projects: &[String]) -> Result<Vec<Value>>
                 )?;
             }
         }
+        "devin" => {}
         _ => bail!("unsupported agent: {agent}"),
     }
     Ok(rows)

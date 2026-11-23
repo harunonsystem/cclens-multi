@@ -17,6 +17,7 @@ enum Agent {
     Opencode,
     Pi,
     Omp,
+    Devin,
 }
 impl Agent {
     fn label(self) -> &'static str {
@@ -26,6 +27,7 @@ impl Agent {
             Self::Opencode => "opencode",
             Self::Pi => "pi",
             Self::Omp => "omp",
+            Self::Devin => "devin",
         }
     }
 }
@@ -86,6 +88,8 @@ struct Cli {
     /// OMP session JSONL root, read-only.
     #[arg(long, global = true)]
     omp: Option<PathBuf>,
+    #[arg(long, global = true)]
+    devin: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -151,15 +155,18 @@ struct Roots {
     pi: PathBuf,
     #[serde(default)]
     omp: PathBuf,
+    #[serde(default)]
+    devin: PathBuf,
 }
 impl Roots {
-    fn sources(&self) -> [(&str, &Path); 5] {
+    fn sources(&self) -> [(&str, &Path); 6] {
         [
             ("claude", &self.claude),
             ("codex", &self.codex),
             ("opencode", &self.opencode),
             ("pi", &self.pi),
             ("omp", &self.omp),
+            ("devin", &self.devin),
         ]
     }
 }
@@ -174,7 +181,7 @@ pub fn run() -> Result<()> {
         return emit(
             &json!({"schema_version":1,"binary":"cclens-multi","first_command":"cclens-multi doctor --json",
             "commands":["analyze","usage","failures","stuck","prompts","inventory","sources","doctor","get","agent-context","claude <upstream command>"],
-            "agents":["claude","codex","opencode","pi","omp"],"filters":["--agent","--project","--model","--since","--until","--limit"],
+            "agents":["claude","codex","opencode","pi","omp","devin"],"filters":["--agent","--project","--model","--since","--until","--limit"],
             "stdout":"data only","stderr":"diagnostics","exit_codes":{"0":"success, including reported coverage gaps","1":"runtime or source error","2":"invalid CLI arguments"},
             "privacy":"inputs read-only; only derived local DB is written; no authentication or network needed",
             "unknown":"NULL values and per-counter known-event counts; never treat gaps as zero",
@@ -198,7 +205,7 @@ pub fn run() -> Result<()> {
         Cli::command()
             .error(
                 clap::error::ErrorKind::MissingRequiredArgument,
-                "get requires --agent claude|codex|opencode|pi|omp",
+                "get requires --agent claude|codex|opencode|pi|omp|devin",
             )
             .exit();
     }
@@ -216,7 +223,7 @@ pub fn run() -> Result<()> {
         validate_paths(&path, &roots, &cli)?;
         let rows=roots.sources().iter().filter(|(a,_)|cli.agent.is_none_or(|selected|selected.label()==*a))
             .map(|(a,p)|Ok(json!({"agent":a,"path":p,"status":if p.exists(){"available"}else{"unavailable"},
-                "files":if !p.exists(){None}else if *a=="opencode"{Some(1)}else{Some(walk(p)?.len())}}))).collect::<Result<Vec<_>>>()?;
+                "files":if !p.exists(){None}else {Some(source_paths(a, p)?.len())}}))).collect::<Result<Vec<_>>>()?;
         return emit(
             &json!({"schema_version":1,"dry_run":true,"would_write_db":path,"rows":rows}),
             cli.json,
@@ -429,6 +436,11 @@ fn resolve_roots(cli: &Cli, prior: Option<Roots>) -> Result<Roots> {
     )?;
     let prior = if cli.home.is_some() { None } else { prior };
     let use_env = std::env::var_os("HOME").is_some_and(|current| Path::new(&current) == home);
+    let xdg_data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|_| use_env)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
     let claude_default = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|_| use_env)
         .filter(|s| !s.is_empty())
@@ -458,14 +470,7 @@ fn resolve_roots(cli: &Cli, prior: Option<Roots>) -> Result<Roots> {
             cli.opencode
                 .clone()
                 .or_else(|| prior.as_ref().map(|r| r.opencode.clone()))
-                .unwrap_or_else(|| {
-                    std::env::var_os("XDG_DATA_HOME")
-                        .filter(|_| use_env)
-                        .map(PathBuf::from)
-                        .filter(|p| p.is_absolute())
-                        .unwrap_or_else(|| home.join(".local/share"))
-                        .join("opencode/opencode.db")
-                }),
+                .unwrap_or_else(|| xdg_data.join("opencode/opencode.db")),
         )?,
         pi: absolute(
             cli.pi
@@ -484,6 +489,17 @@ fn resolve_roots(cli: &Cli, prior: Option<Roots>) -> Result<Roots> {
                 })
                 .unwrap_or_else(|| home.join(".omp/agent/sessions")),
         )?,
+        devin: absolute(
+            cli.devin
+                .clone()
+                .or_else(|| {
+                    prior
+                        .as_ref()
+                        .map(|r| r.devin.clone())
+                        .filter(|p| !p.as_os_str().is_empty())
+                })
+                .unwrap_or_else(|| xdg_data.join("devin/cli/transcripts")),
+        )?,
         home,
     })
 }
@@ -501,7 +517,9 @@ fn validate_paths(database: &Path, roots: &Roots, cli: &Cli) -> Result<()> {
             "codex" => cli.codex.is_some(),
             "opencode" => cli.opencode.is_some(),
             "pi" => cli.pi.is_some(),
-            _ => cli.omp.is_some(),
+            "omp" => cli.omp.is_some(),
+            "devin" => cli.devin.is_some(),
+            _ => unreachable!(),
         };
         if explicit && !path.exists() {
             bail!(
@@ -513,10 +531,11 @@ fn validate_paths(database: &Path, roots: &Roots, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn walk(path: &Path) -> Result<Vec<PathBuf>> {
-    if path.is_file() {
+fn source_paths(agent: &str, path: &Path) -> Result<Vec<PathBuf>> {
+    if agent == "opencode" || path.is_file() {
         return Ok(vec![path.to_owned()]);
     }
+    let extension = if agent == "devin" { "json" } else { "jsonl" };
     let mut found = Vec::new();
     let mut dirs = vec![path.to_owned()];
     while let Some(dir) = dirs.pop() {
@@ -527,7 +546,7 @@ fn walk(path: &Path) -> Result<Vec<PathBuf>> {
             let kind = entry.file_type()?;
             if kind.is_dir() {
                 dirs.push(entry.path());
-            } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "jsonl") {
+            } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == extension) {
                 found.push(entry.path());
             }
         }
@@ -576,11 +595,7 @@ fn analyze(store: &Store, roots: &Roots, selected: Option<Agent>) -> Result<Valu
             )?;
             continue;
         }
-        let paths = if agent == "opencode" {
-            vec![root.to_owned()]
-        } else {
-            walk(root)?
-        };
+        let paths = source_paths(agent, root)?;
         if paths.is_empty() {
             db::source(
                 conn,
@@ -588,7 +603,7 @@ fn analyze(store: &Store, roots: &Roots, selected: Option<Agent>) -> Result<Valu
                 &root_text,
                 None,
                 "empty",
-                &["no JSONL files found; historical usage is unknown".into()],
+                &["no transcript files found; historical usage is unknown".into()],
                 0,
             )?;
         }
@@ -626,6 +641,7 @@ fn analyze(store: &Store, roots: &Roots, selected: Option<Agent>) -> Result<Valu
                 let b = match agent {
                     "claude" => adapter::claude::parse(&text, &source),
                     "codex" => adapter::codex::parse(&text, &source),
+                    "devin" => adapter::devin::parse(&text, &source),
                     _ => adapter::pi::parse(&text, &source),
                 };
                 (fp, b)
@@ -648,7 +664,7 @@ fn analyze(store: &Store, roots: &Roots, selected: Option<Agent>) -> Result<Valu
     }
     if available == 0 {
         bail!(
-            "no readable sources; set --claude/--codex/--opencode/--pi/--omp or --home; missing sources are unknown"
+            "no readable sources; set --claude/--codex/--opencode/--pi/--omp/--devin or --home; missing sources are unknown"
         );
     }
     let gaps: u64 = conn.query_row("SELECT COUNT(*) FROM multi_sources WHERE (?1 IS NULL OR agent=?1) AND (status!='available' OR unknown_records>0 OR json_array_length(warnings)>0)",
