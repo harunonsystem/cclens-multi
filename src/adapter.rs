@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 pub mod config;
 pub mod config_multi;
+pub mod devin;
 pub mod multi;
 pub mod opencode;
 pub mod pi;

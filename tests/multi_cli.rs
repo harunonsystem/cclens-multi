@@ -825,3 +825,71 @@ fn old_roots_refresh_invalidates_pi_cache_and_discovers_omp_separately() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn devin_atif_discovers_transcript_and_counts_only_step_usage() {
+    let root = std::env::temp_dir().join(format!(
+        "cclens-devin-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let dir = root.join(".local/share/devin/cli/transcripts");
+    fs::create_dir_all(&dir).unwrap();
+    let transcript = json!({
+        "schema_version":"ATIF-v1.7", "session_id":"synthetic",
+        "agent":{"name":"devin","model_name":"default-model"},
+        "steps":[
+            {"step_id":1,"source":"system","message":"system context"},
+            {"step_id":2,"source":"user","message":"Please fix SYNTHETIC_PRIVATE_PROMPT."},
+            {"step_id":3,"source":"agent","model_name":"step-model",
+             "timestamp":"2026-01-01T00:00:00Z",
+             "metrics":{"prompt_tokens":10,"cached_tokens":4,"completion_tokens":3}}
+        ],
+        "final_metrics":{"total_prompt_tokens":10,"total_completion_tokens":3}
+    });
+    fs::write(dir.join("session.json"), transcript.to_string()).unwrap();
+    fs::write(dir.join("ignore.jsonl"), "not a Devin transcript").unwrap();
+    for _ in 0..2 {
+        let result = cli(
+            &root,
+            &[
+                "usage",
+                "--home",
+                root.to_str().unwrap(),
+                "--agent",
+                "devin",
+                "--json",
+            ],
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+        let row = &report["rows"][0];
+        assert_eq!(row["model"], "step-model");
+        assert_eq!(row["usage_events"], 1);
+        assert_eq!(row["input_tokens"], 10);
+        assert_eq!(row["cache_read_tokens"], 4);
+        assert_eq!(row["output_tokens"], 3);
+        assert_eq!(row["total_tokens"], 13);
+        assert_eq!(report["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(report["sources"][0]["unknown_records"], 0);
+    }
+    let result = cli(
+        &root,
+        &["prompts", "--agent", "devin", "--frozen", "--json"],
+    );
+    assert!(result.status.success());
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["rows"][0]["count"], 1);
+    assert!(
+        !String::from_utf8_lossy(&fs::read(root.join("analysis.db")).unwrap())
+            .contains("SYNTHETIC_PRIVATE_PROMPT")
+    );
+    fs::remove_dir_all(root).unwrap();
+}

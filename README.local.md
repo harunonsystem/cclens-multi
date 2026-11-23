@@ -1,6 +1,6 @@
 # cclens-multi
 
-Claude Code・Codex・OpenCode・pi・OMP のローカルログを共通 SQLite に集計する Rust CLI。コマンド名は `cclens-multi` で、既存の `cclens` と共存する。
+Claude Code・Codex・OpenCode・pi・OMP・Devin CLI のローカルログを共通 SQLite に集計する Rust CLI。コマンド名は `cclens-multi` で、既存の `cclens` と共存する。
 
 本家 [lambdalisue/cclens](https://github.com/lambdalisue/cclens) の公開 fork で、Git 履歴と [MIT LICENSE](LICENSE) を保持する。本家の説明は [README.md](README.md)、拡張の契約は [multi-agent spec](docs/specs/multi-agent.md) にある。
 
@@ -102,8 +102,11 @@ cclens-multi get '<example.id>' --agent codex --frozen --json
 | OpenCode | `~/.local/share/opencode/opencode.db` | `--opencode PATH`、`XDG_DATA_HOME` |
 | pi | `~/.pi/agent/sessions/` | `--pi PATH` |
 | OMP | `~/.omp/agent/sessions/` | `--omp PATH` |
+| Devin CLI | `~/.local/share/devin/cli/transcripts/` | `--devin PATH`、`XDG_DATA_HOME` |
 
-`--home PATH` は別の home 配下を使う。明示指定した入力ルートは DB に記録され、次の増分実行で再利用する。入力フラグはディレクトリに加えて単一 JSONL も受け付ける。OpenCode は SQLite とその WAL を読み取り専用のトランザクションで読む。
+Devin CLI は ATIF v1.7 JSON（ディレクトリまたは単一ファイル）からトークン使用量とプロンプト分類を集計する。プロジェクト・ツールの成否・設定一覧・費用は未対応。
+
+`--home PATH` は別の home 配下を使う。明示指定した入力ルートは DB に記録され、次の増分実行で再利用する。JSONL の入力フラグはディレクトリと単一ファイルのどちらも受け付ける。OpenCode は SQLite とその WAL を読み取り専用のトランザクションで読む。
 
 DB は `${XDG_STATE_HOME:-~/.local/state}/cclens-multi/analysis.db`。`--db /absolute/path/analysis.db` で変更できる。入力先への DB 書き込みは拒否する。Unix の保存ディレクトリと DB は所有者のみアクセス可能。消えた入力から抽出済みの履歴は保持し、ソースの不在を表示する。
 
@@ -111,11 +114,11 @@ DB は `${XDG_STATE_HOME:-~/.local/state}/cclens-multi/analysis.db`。`--db /abs
 
 - トークンは入力に cache read/write、出力に reasoning を含む共通形式。cache と reasoning は内数なので重ねて加算しない。欠損は `null`、合計は取得できた値だけの合計。`known_*_events` と `usage_events` を比較する。
 - Codex の旧累積カウンタは差分化し、重複スナップショットを除く。応答単位ログがある区間はそちらを優先する。旧区間の応答同一性は推定のため `estimated_usage_events` に入る。初期累積値の前史が不明な場合は直近応答だけを数え、警告する。
-- 失敗の発生はログの error/終了コードを根拠にし、失敗カテゴリ、編集反復による修正ループ、指示・修正・継続・質問の分類は推定。編集反復だけでは作業の失敗を断定しない。`examples` → `get` で元の JSONL 行番号または SQLite の table/row ID を辿れる。
+- 失敗の発生はログの error/終了コードを根拠にし、失敗カテゴリ、編集反復による修正ループ、指示・修正・継続・質問の分類は推定。編集反復だけでは作業の失敗を断定しない。`examples` → `get` で元の JSONL 行番号、ATIF の `step_id`、または SQLite の table/row ID を辿れる。
 - `reported_api_equivalent_usd` はログに記録された API 換算額。モデル料金表から新しく計算しない。`actual_payment_usd` は常に `null`。定額契約の実際の支払額や OpenCode の provider 固有の単位と同一視しない。
 - 設定・skill の存在と Markdown の概算トークン量を収集する。`static_tokens` は定義全体、`startup_tokens` は起動時、`on_demand_tokens` は必要時に読む本文の概算。Claude は既存 parser の `load_mode` を保持し、他の Agent のロード方式・起動時コストは推測せず `null` にする。外部 plugin の全設定や実際のロード状態は網羅しない。Claude 以外の設定 JSON/TOML はファイルのメタデータだけを読む。skill の明示呼び出し・読み取りは区別し、トレースがなければ `null` / `unavailable`。取得できない使用回数をゼロや未使用と扱わない。
 
-変更確認はJSONLを固定サイズのバッファでハッシュし、OpenCodeは読み取りトランザクション内で生の行をハッシュする。サイズ・更新時刻だけでスキップせず、同サイズの書き換えやWAL内の更新も検出する。usage・failures・promptsはSQLiteから逐次集計する。`--limit` は表示件数だけを制限し、総数や合計の計算対象は減らさない。編集バーストの検出は引き続き対象の編集履歴をメモリに保持する。
+変更確認はJSONLとATIF JSONを固定サイズのバッファでハッシュし、OpenCodeは読み取りトランザクション内で生の行をハッシュする。サイズ・更新時刻だけでスキップせず、同サイズの書き換えやWAL内の更新も検出する。usage・failures・promptsはSQLiteから逐次集計する。`--limit` は表示件数だけを制限し、総数や合計の計算対象は減らさない。編集バーストの検出は引き続き対象の編集履歴をメモリに保持する。
 
 Codex の単独 `rg` 検索で終了コード 1・空出力の記録は「該当なし」として failure から除く。実行エラー・複合コマンド・欠損フィールドは除外しない。既存 DB には次の refresh で反映され、`--frozen` は保存済みの結果をそのまま返す。
 

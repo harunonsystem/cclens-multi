@@ -29,7 +29,7 @@ Short pi IDs alone do not identify independent sessions. Copied fork histories a
 across an agent, not just within a file. Codex cumulative baselines in fork
 prefixes do not represent new usage. Sources are replaced transactionally on
 refresh; unchanged files may be skipped only under the same adapter version.
-JSONL change detection hashes bytes with bounded buffering rather than retaining
+JSONL and ATIF JSON change detection hashes bytes with bounded buffering rather than retaining
 the whole file; changed files are then read and their content fingerprint is
 recomputed before replacement. OpenCode hashes the raw session/message/part rows
 inside the same read transaction used for extraction, before parsing JSON or
@@ -62,11 +62,11 @@ doctor's separate per-kind queries. Usage sums remain checked unsigned sums with
 coverage; overflowing sums are NULL. Edit-burst detection still needs the matching
 edit timeline. Row limits bound output, not the events needed for exact totals.
 
-Input JSONL files and the OpenCode database are opened read-only. Stored multi_* facts
+Input JSONL files, ATIF JSON files, and the OpenCode database are opened read-only. Stored multi_* facts
 contain counters, classifications and source references, never prompt bodies,
 command bodies, configuration bodies or authentication material. The upstream
 Claude tables retain their existing bounded error excerpts. Evidence
-references use one-based JSONL lines or SQLite table and row IDs.
+references use one-based JSONL lines, ATIF step IDs, or SQLite table and row IDs.
 
 Runtimes can write machine context as user-role text. The shared adapter prompt
 boundary excludes empty text and known leading markers for harness instructions
@@ -107,7 +107,7 @@ is never called unused. Global entries are shadowed by a same-agent, same-kind,
 same-ID project entry for traces from that project, so one trace does not count
 against both entries.
 
-Acceptance checks cover five-agent synthetic input through CLI output,
+Acceptance checks cover synthetic multi-agent input through CLI output,
 incremental retry, cumulative resets, copied forks, missing fields, malformed
 tail recovery, source safety, upstream Claude tests, and real local input.
 Commands must terminate with closed stdin and work outside the checkout.
@@ -122,3 +122,13 @@ records or counting their originalTokens as model usage. Unrecognized ledger
 shapes still report unknown records. OpenCode's total counter is optional when
 the component counters permit a derived total; malformed explicit counters
 remain coverage warnings. Refresh invalidates previous adapter-version caches.
+
+Devin CLI is selected as `devin`. It reads local ATIF v1.7 JSON transcripts
+from `$XDG_DATA_HOME/devin/cli/transcripts` (default `~/.local/share/devin/cli/transcripts`)
+or a directory or single file supplied via `--devin`. Older stored roots acquire
+this default on refresh. Session ID and step ID identify events. Agent steps
+with metrics report usage; prompt tokens already include cache reads, and
+completion tokens are output. Missing counters stay unknown. Final metrics
+are not counted a second time. User steps contribute prompt classifications
+without storing the text. Project, tool outcomes, config inventory, and costs
+are not inferred from these transcripts.
