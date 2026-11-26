@@ -99,6 +99,9 @@ jobs:
     uses: lambdalisue/nix-github-release/.github/workflows/build.yml@v0.1.0
     with:
       cachix-cache: cclens
+      # PRs only need the Linux x86_64 cache warm; main keeps every advertised
+      # system warm so macOS and ARM installs can substitute rather than compile.
+      runners: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]' }}
     secrets:
       cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
